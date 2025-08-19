@@ -10,3 +10,4 @@ redis
 httpx
 python-multipart
 xgboost==3.0.4
+pandas
