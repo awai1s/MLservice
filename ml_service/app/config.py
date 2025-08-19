@@ -23,7 +23,7 @@ class Settings:
     # model paths
     PRICE_MODEL_PATH: str = os.getenv("PRICE_MODEL_PATH", "app/models/price_model.joblib")
     DUP_INDEX_DIR: str    = os.getenv("DUP_INDEX_DIR",    "app/models/dupdet_index")
-    RECO_MODEL_PATH: str  = os.getenv("RECO_MODEL_PATH",  "app/models/reco/als_bm25_final.joblib")
+    RECO_MODEL_PATH: str  = os.getenv("RECO_MODEL_PATH",  "app/models/reco/als_bm25_tuned.joblib")
     RECO_ITEM_META: str   = os.getenv("RECO_ITEM_META",   "app/models/reco/item_catalog.csv")
     RECO_MAPPINGS: str    = os.getenv("RECO_MAPPINGS",    "app/models/reco/mappings.json")
 
