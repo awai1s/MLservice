@@ -1,22 +1,89 @@
 from fastapi import APIRouter
-from typing import List
+from typing import List, Optional
 from ..schemas import RecommendIn, RecommendOut, Recommendation
 from ..config import settings
 from ..utils import timeboxed
-import joblib, json, math
+import joblib, json, math, os
+import pandas as pd
+import numpy as np
 
 router = APIRouter(tags=["Recommend"])
 
+# Optional: keep handles if you later want ALS/item factors
 _model = None
 _maps = None
+_catalog: Optional[pd.DataFrame] = None
 
-def _load():
+def _load_models():
+    """
+    Optional ALS + mappings loader (kept for future use).
+    We don't require them for the 'preferences-only' contract,
+    but we try to load gracefully if present.
+    """
     global _model, _maps
-    if _model is None:
-        _model = joblib.load(settings.RECO_MODEL_PATH)   # ALS model
-        with open(settings.RECO_MAPPINGS, "r", encoding="utf-8") as f:
-            _maps = json.load(f)  # expects user_to_idx, item_to_idx, idx_to_item
+    if _model is None and os.path.exists(settings.RECO_MODEL_PATH):
+        try:
+            _model = joblib.load(settings.RECO_MODEL_PATH)
+        except Exception:
+            _model = None
+    if _maps is None and os.path.exists(settings.RECO_MAPPINGS):
+        try:
+            with open(settings.RECO_MAPPINGS, "r", encoding="utf-8") as f:
+                _maps = json.load(f)
+        except Exception:
+            _maps = None
     return _model, _maps
+
+def _load_catalog() -> pd.DataFrame:
+    """
+    Load item catalog with columns like:
+      - id or item_id
+      - title (optional)
+      - category
+      - price
+      - pop (optional popularity score)
+    Falls back sensibly if some columns are missing.
+    """
+    global _catalog
+    if _catalog is not None:
+        return _catalog
+
+    if not os.path.exists(settings.RECO_ITEM_META):
+        # empty fallback
+        _catalog = pd.DataFrame(columns=["listing_id", "category", "price", "pop"])
+        return _catalog
+
+    df = pd.read_csv(settings.RECO_ITEM_META)
+
+    # Normalize id column name
+    if "listing_id" not in df.columns:
+        if "item_id" in df.columns:
+            df = df.rename(columns={"item_id": "listing_id"})
+        elif "id" in df.columns:
+            df = df.rename(columns={"id": "listing_id"})
+        else:
+            # as a last resort, use row index as id
+            df["listing_id"] = np.arange(len(df))
+
+    # Ensure required fields exist
+    if "category" not in df.columns:
+        df["category"] = "Other"
+    if "price" not in df.columns:
+        df["price"] = np.nan
+    if "pop" not in df.columns:
+        # if we have any engagement columns, build a crude popularity; else 1.0
+        pop_cols = [c for c in ["saved_count", "likes", "views"] if c in df.columns]
+        if pop_cols:
+            df["pop"] = df[pop_cols].fillna(0).sum(axis=1)
+        else:
+            df["pop"] = 1.0
+
+    # Clean price
+    df["price"] = pd.to_numeric(df["price"], errors="coerce")
+    df["price"] = df["price"].fillna(df["price"].median() if df["price"].notna().any() else 0.0)
+
+    _catalog = df
+    return _catalog
 
 def _scale01_to_pct(x: float) -> int:
     x = max(0.0, min(1.0, x))
@@ -26,63 +93,91 @@ def _scale01_to_pct(x: float) -> int:
 @timeboxed(settings.BUDGET_RECO_MS)
 def recommend(payload: RecommendIn):
     """
-    Rank ONLY the provided available_listings based on:
-    - ALS user->item signal (if user known)
-    - Category match to user_preferences.categories
-    - Price fit vs. user_preferences.max_price
-    Returns top items with score 0..100 and a brief reason.
+    Input: only user_preferences {categories, max_price}
+    Output: top-N recommendations + a top-level reasoning string.
     """
-    model, maps = _load()
-    uid = maps.get("user_to_idx", {}).get(str(payload.user_id))
-    have_user = uid is not None
+    _load_models()  # not strictly needed, but harmless
+    df = _load_catalog().copy()
+
+    cats_pref = set([c.strip() for c in payload.user_preferences.categories if c.strip()])
+    max_price = float(payload.user_preferences.max_price)
+
+    # ------- Filter candidates -------
+    filtered = df
+    filters_applied = []
+
+    if cats_pref:
+        filtered = filtered[filtered["category"].isin(cats_pref)]
+        filters_applied.append(f"categories={sorted(cats_pref)}")
+
+    if max_price > 0:
+        filtered = filtered[filtered["price"] <= max_price]
+        filters_applied.append(f"max_price≤{max_price}")
+
+    # If filters removed everything, relax them gradually
+    if filtered.empty and cats_pref:
+        filtered = df[df["category"].isin(cats_pref)]
+    if filtered.empty:
+        filtered = df  # fallback to whole catalog
+
+    if filtered.empty:
+        return RecommendOut(recommendations=[], reasoning="No items available in catalog.")
+
+    # ------- Scoring -------
+    # Popularity component
+    pop = filtered["pop"].astype(float)
+    pmin, pmax = float(pop.min()), float(pop.max())
+    pop_norm = (pop - pmin) / (pmax - pmin) if pmax > pmin else pd.Series(0.5, index=filtered.index)
+
+    # Budget fit component
+    if max_price > 0:
+        fit = 1.0 - (max_price - filtered["price"]) / max_price
+        fit = fit.clip(lower=0.0, upper=1.0)
+    else:
+        fit = pd.Series(0.0, index=filtered.index)
+
+    # Category bonus (small boost if matches preference)
+    cat_bonus = filtered["category"].isin(cats_pref).astype(float) * 0.05
+
+    # Weighted sum → 0..1
+    score01 = (0.75 * pop_norm) + (0.20 * fit) + cat_bonus
+    score01 = score01.clip(lower=0.0, upper=1.0)
+
+    filtered = filtered.assign(_score=score01)
+
+    # ------- Build response -------
+    filtered = filtered.sort_values("_score", ascending=False).head(10)
 
     recs: List[Recommendation] = []
-    cats = set(payload.user_preferences.categories)
-    max_price = payload.user_preferences.max_price  # required by schema (can still be 0)
+    for _, row in filtered.iterrows():
+        reasons = []
+        if row["_score"] >= 0:
+            if cats_pref and row["category"] in cats_pref:
+                reasons.append(f"matches preferred category {row['category']}")
+            if max_price > 0:
+                if row["price"] <= max_price:
+                    reasons.append(f"within your budget (≤ {max_price})")
+                else:
+                    reasons.append("slightly above budget")
+            # popularity reasoning
+            if pmax > pmin and row["pop"] >= (pmin + 0.66 * (pmax - pmin)):
+                reasons.append("popular on campus")
 
-    for lst in payload.available_listings:
-        reason_bits = []
-        score_components = []
+        recs.append(
+            Recommendation(
+                listing_id=row["listing_id"],
+                score=_scale01_to_pct(float(row["_score"])),
+                reason=", ".join(reasons) if reasons else "recommended by popularity"
+            )
+        )
 
-        # (1) ALS signal
-        als_score = 0.0
-        if have_user:
-            item_idx = maps.get("item_to_idx", {}).get(str(lst.id))
-            if item_idx is not None:
-                u = model.user_factors[uid]
-                v = model.item_factors[item_idx]
-                dot = float((u * v).sum())
-                als_score = 1 / (1 + math.exp(-dot))  # squash to 0..1
-                score_components.append(0.6 * als_score)
-                reason_bits.append("similar to items you interacted with")
+    summary_bits = []
+    if cats_pref:
+        summary_bits.append(f"focused on categories {sorted(cats_pref)}")
+    if max_price > 0:
+        summary_bits.append(f"priced at or under {max_price}")
+    if not summary_bits:
+        summary_bits.append("ranked by popularity")
+    reasoning = "; ".join(summary_bits) + "."
 
-        # (2) Category preference
-        cat_bonus = 1.0 if (lst.category in cats) else 0.0
-        score_components.append(0.25 * cat_bonus)
-        if cat_bonus > 0:
-            reason_bits.append(f"matches preferred category {lst.category}")
-
-        # (3) Price fit (guard against zero/negative to avoid division by zero)
-        price_bonus = 0.0
-        if max_price > 0:
-            if lst.price <= max_price:
-                rel = 1.0 - (max_price - lst.price) / max_price  # 0..1
-                rel = max(0.0, min(1.0, rel))
-                price_bonus = 0.15 * rel
-                reason_bits.append(f"within your budget (≤ {max_price})")
-            else:
-                price_bonus = -0.1
-                reason_bits.append("over budget")
-        # else: no budget contribution
-
-        score_components.append(price_bonus)
-
-        score01 = max(0.0, min(1.0, sum(score_components)))
-        recs.append(Recommendation(
-            listing_id=lst.id,
-            score=_scale01_to_pct(score01),
-            reason=", ".join(reason_bits) if reason_bits else "popular on campus",
-        ))
-
-    recs.sort(key=lambda r: r.score, reverse=True)
-    return RecommendOut(recommendations=recs[:10])
+    return RecommendOut(recommendations=recs, reasoning=reasoning)

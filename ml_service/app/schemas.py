@@ -9,8 +9,10 @@ class PredictPriceIn(BaseModel):
     condition: str
 
 class PredictPriceOut(BaseModel):
-    predicted_price: float
-    confidence: int = Field(ge=0, le=100)
+    predicted_price: float          # e.g., 450.0
+    min_predicted_price: float      # lower bound of price band
+    max_predicted_price: float      # upper bound of price band
+    confidence: int                 # 0..100
     explanation: str
 
 
@@ -32,20 +34,16 @@ class DuplicateOut(BaseModel):
 
 
 # ---------- /recommend ----------
+from pydantic import BaseModel, Field
+from typing import List, Union
+
+# ---------- /recommend ----------
 class UserPreferences(BaseModel):
     categories: List[str]
-    max_price: float  # require it (no Optional)
-
-class AvailableListing(BaseModel):
-    id: Union[int, str]
-    title: str
-    category: str
-    price: float
+    max_price: float  # required
 
 class RecommendIn(BaseModel):
-    user_id: Union[int, str]
-    user_preferences: UserPreferences
-    available_listings: List[AvailableListing]
+    user_preferences: UserPreferences  # <-- only user preferences
 
 class Recommendation(BaseModel):
     listing_id: Union[int, str]
@@ -54,3 +52,5 @@ class Recommendation(BaseModel):
 
 class RecommendOut(BaseModel):
     recommendations: List[Recommendation]
+    reasoning: str  # top-level summary for the response
+
