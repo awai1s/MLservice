@@ -1,0 +1,19 @@
+{
+  "run_stamp": "20250815_180610",
+  "text_cols": [
+    "title_norm",
+    "description_norm",
+    "keywords"
+  ],
+  "img_hash_cols": [
+    "img_phash",
+    "img_ahash",
+    "img_dhash"
+  ],
+  "alpha_text": 0.7,
+  "top_m_for_image": 200,
+  "default_threshold": 0.75,
+  "source_csv": "output/seed_dataset_modelready_v3.csv",
+  "num_items": 180000,
+  "vocab_size": 46536
+}

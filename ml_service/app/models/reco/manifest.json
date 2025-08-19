@@ -1,0 +1,16 @@
+{
+  "split": "strong_positive_holdout",
+  "bm25": true,
+  "orientation": "user_items",
+  "factors": 64,
+  "regularization": 0.04,
+  "iterations": 25,
+  "content_features": [
+    "category",
+    "brand",
+    "condition",
+    "price_band",
+    "log_price"
+  ],
+  "random_seed": 42
+}

@@ -1,0 +1,10 @@
+{
+  "orientation": "user_items",
+  "split": "strong_positive_holdout",
+  "factors": 64,
+  "reg": 0.04,
+  "iters": 25,
+  "K1": 1.8,
+  "B": 0.75,
+  "random_seed": 42
+}

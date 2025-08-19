@@ -1,0 +1,5 @@
+{
+  "precision_at_10": 0.0301,
+  "precision_at_20": 0.0578,
+  "tested_users": 10000
+}
