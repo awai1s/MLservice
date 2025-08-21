@@ -3,181 +3,187 @@ from typing import List, Optional
 from ..schemas import RecommendIn, RecommendOut, Recommendation
 from ..config import settings
 from ..utils import timeboxed
-import joblib, json, math, os
-import pandas as pd
+
+import os, json, joblib, re
 import numpy as np
 
 router = APIRouter(tags=["Recommend"])
 
-# Optional: keep handles if you later want ALS/item factors
-_model = None
-_maps = None
-_catalog: Optional[pd.DataFrame] = None
+# ---------- text utils ----------
+_ws = re.compile(r"\s+")
+def _norm(s: str) -> str:
+    s = (s or "").lower().strip()
+    return _ws.sub(" ", s)
 
-def _load_models():
-    """
-    Optional ALS + mappings loader (kept for future use).
-    We don't require them for the 'preferences-only' contract,
-    but we try to load gracefully if present.
-    """
-    global _model, _maps
-    if _model is None and os.path.exists(settings.RECO_MODEL_PATH):
-        try:
-            _model = joblib.load(settings.RECO_MODEL_PATH)
-        except Exception:
-            _model = None
-    if _maps is None and os.path.exists(settings.RECO_MAPPINGS):
-        try:
-            with open(settings.RECO_MAPPINGS, "r", encoding="utf-8") as f:
-                _maps = json.load(f)
-        except Exception:
-            _maps = None
-    return _model, _maps
+def _token_set(s: str) -> set:
+    return set(re.findall(r"[a-z0-9]+", _norm(s)))
 
-def _load_catalog() -> pd.DataFrame:
-    """
-    Load item catalog with columns like:
-      - id or item_id
-      - title (optional)
-      - category
-      - price
-      - pop (optional popularity score)
-    Falls back sensibly if some columns are missing.
-    """
-    global _catalog
-    if _catalog is not None:
-        return _catalog
-
-    if not os.path.exists(settings.RECO_ITEM_META):
-        # empty fallback
-        _catalog = pd.DataFrame(columns=["listing_id", "category", "price", "pop"])
-        return _catalog
-
-    df = pd.read_csv(settings.RECO_ITEM_META)
-
-    # Normalize id column name
-    if "listing_id" not in df.columns:
-        if "item_id" in df.columns:
-            df = df.rename(columns={"item_id": "listing_id"})
-        elif "id" in df.columns:
-            df = df.rename(columns={"id": "listing_id"})
-        else:
-            # as a last resort, use row index as id
-            df["listing_id"] = np.arange(len(df))
-
-    # Ensure required fields exist
-    if "category" not in df.columns:
-        df["category"] = "Other"
-    if "price" not in df.columns:
-        df["price"] = np.nan
-    if "pop" not in df.columns:
-        # if we have any engagement columns, build a crude popularity; else 1.0
-        pop_cols = [c for c in ["saved_count", "likes", "views"] if c in df.columns]
-        if pop_cols:
-            df["pop"] = df[pop_cols].fillna(0).sum(axis=1)
-        else:
-            df["pop"] = 1.0
-
-    # Clean price
-    df["price"] = pd.to_numeric(df["price"], errors="coerce")
-    df["price"] = df["price"].fillna(df["price"].median() if df["price"].notna().any() else 0.0)
-
-    _catalog = df
-    return _catalog
+def _title_sim(a: str, b: str) -> float:
+    ta, tb = _token_set(a), _token_set(b)
+    if not ta or not tb:
+        return 0.0
+    inter = len(ta & tb)
+    union = len(ta | tb)
+    return inter / union if union else 0.0
 
 def _scale01_to_pct(x: float) -> int:
     x = max(0.0, min(1.0, x))
     return int(round(100 * x))
 
+# ---------- ALS lazy-load ----------
+_als_model = None
+_als_maps: Optional[dict] = None
+
+def _load_als():
+    """Load ALS model + mappings only if both files exist; else return (None, None)."""
+    global _als_model, _als_maps
+    if _als_model is not None or _als_maps is not None:
+        return _als_model, _als_maps
+
+    if not os.path.exists(settings.RECO_MODEL_PATH):
+        return None, None
+    if not os.path.exists(settings.RECO_MAPPINGS):
+        return None, None
+
+    try:
+        _als_model = joblib.load(settings.RECO_MODEL_PATH)  # implicit ALS or compatible
+    except Exception:
+        _als_model = None
+
+    try:
+        with open(settings.RECO_MAPPINGS, "r", encoding="utf-8") as f:
+            _als_maps = json.load(f)  # expects keys: "user2idx", "item2idx"
+    except Exception:
+        _als_maps = None
+
+    return _als_model, _als_maps
+
 @router.post("/recommend", response_model=RecommendOut)
 @timeboxed(settings.BUDGET_RECO_MS)
 def recommend(payload: RecommendIn):
     """
-    Input: only user_preferences {categories, max_price}
-    Output: top-N recommendations + a top-level reasoning string.
+    Hybrid recommender:
+      - Baseline: content (title) + filters (category/condition) + popularity (likes/saves/views)
+      - ALS personalization: only if model + mappings + user_id are available; blended with baseline.
     """
-    _load_models()  # not strictly needed, but harmless
-    df = _load_catalog().copy()
+    cand_cat  = (payload.category or "").strip()
+    cand_cond = (payload.condition or "").strip()
+    cand_title = payload.title or ""
+    cand_desc  = payload.description or ""
+    cand_text  = f"{cand_title} {cand_desc}".strip()
 
-    cats_pref = set([c.strip() for c in payload.user_preferences.categories if c.strip()])
-    max_price = float(payload.user_preferences.max_price)
+    listings = payload.available_listings or []
+    if not listings:
+        return RecommendOut(recommendations=[], reasoning="No available listings provided.")
 
-    # ------- Filter candidates -------
-    filtered = df
-    filters_applied = []
+    # ---------- Popularity for the current pool (normalized 0..1) ----------
+    pop_raw = []
+    for l in listings:
+        s = float(getattr(l, "saved_count", 0) or 0)
+        k = float(getattr(l, "likes", 0) or 0)
+        v = float(getattr(l, "views", 0) or 0)
+        pop_raw.append(0.4 * s + 0.4 * k + 0.2 * v)
 
-    if cats_pref:
-        filtered = filtered[filtered["category"].isin(cats_pref)]
-        filters_applied.append(f"categories={sorted(cats_pref)}")
+    pmin, pmax = (min(pop_raw), max(pop_raw)) if pop_raw else (0.0, 1.0)
+    pop_norm = [(x - pmin) / (pmax - pmin) if pmax > pmin else 0.5 for x in pop_raw]
 
-    if max_price > 0:
-        filtered = filtered[filtered["price"] <= max_price]
-        filters_applied.append(f"max_price≤{max_price}")
+    # ---------- Baseline score (0..1) ----------
+    # weights: title 0.40, category 0.25, condition 0.15, popularity 0.20
+    base_scores = []
+    cat_matches = []
+    cond_matches = []
+    title_sims = []
+    for idx, l in enumerate(listings):
+        cat_match  = 1.0 if (l.category or "") == cand_cat and cand_cat else 0.0
+        cond_match = 1.0 if (l.condition or "") == cand_cond and cand_cond else 0.0
+        tsim       = _title_sim(cand_text, f"{l.title or ''} {l.description or ''}")
+        pop01      = float(pop_norm[idx])
 
-    # If filters removed everything, relax them gradually
-    if filtered.empty and cats_pref:
-        filtered = df[df["category"].isin(cats_pref)]
-    if filtered.empty:
-        filtered = df  # fallback to whole catalog
+        base = (0.40 * tsim) + (0.25 * cat_match) + (0.15 * cond_match) + (0.20 * pop01)
+        base = max(0.0, min(1.0, base))
 
-    if filtered.empty:
-        return RecommendOut(recommendations=[], reasoning="No items available in catalog.")
+        base_scores.append(base)
+        cat_matches.append(cat_match)
+        cond_matches.append(cond_match)
+        title_sims.append(tsim)
 
-    # ------- Scoring -------
-    # Popularity component
-    pop = filtered["pop"].astype(float)
-    pmin, pmax = float(pop.min()), float(pop.max())
-    pop_norm = (pop - pmin) / (pmax - pmin) if pmax > pmin else pd.Series(0.5, index=filtered.index)
+    base_scores = np.array(base_scores, dtype=float)
 
-    # Budget fit component
-    if max_price > 0:
-        fit = 1.0 - (max_price - filtered["price"]) / max_price
-        fit = fit.clip(lower=0.0, upper=1.0)
+    # ---------- ALS personalization (only if everything is available) ----------
+    als_scores = None
+    model, maps = _load_als()
+    if (
+        model is not None
+        and maps is not None
+        and getattr(payload, "user_id", None) is not None
+        and "user2idx" in maps
+        and "item2idx" in maps
+    ):
+        uid_str = str(payload.user_id)
+        if uid_str in maps["user2idx"]:
+            try:
+                uidx = int(maps["user2idx"][uid_str])
+                user_vec = model.user_factors[uidx]  # shape [k]
+
+                # score only the provided pool (requires each listing id mapped to ALS index)
+                raw = []
+                for l in listings:
+                    iid = str(l.id)
+                    if iid in maps["item2idx"]:
+                        iidx = int(maps["item2idx"][iid])
+                        item_vec = model.item_factors[iidx]  # shape [k]
+                        raw.append(float(np.dot(user_vec, item_vec)))  # raw CF score
+                    else:
+                        raw.append(None)
+
+                # normalize ALS scores over the available candidates
+                vals = [x for x in raw if x is not None]
+                if vals:
+                    amin, amax = min(vals), max(vals)
+                    als_scores = []
+                    for x in raw:
+                        if x is None:
+                            als_scores.append(0.0)
+                        else:
+                            als_scores.append((x - amin) / (amax - amin + 1e-9) if amax > amin else 0.5)
+                    als_scores = np.array(als_scores, dtype=float)
+                # else: keep als_scores=None to skip blending
+            except Exception:
+                als_scores = None  # fail-safe
+
+    # ---------- Blend (if ALS available) ----------
+    ALS_WEIGHT = 0.35  # tune as needed
+    if als_scores is not None:
+        final01 = (1.0 - ALS_WEIGHT) * base_scores + ALS_WEIGHT * als_scores
+        personalized_flags = als_scores > 0.0
     else:
-        fit = pd.Series(0.0, index=filtered.index)
+        final01 = base_scores
+        personalized_flags = np.zeros_like(final01, dtype=bool)
 
-    # Category bonus (small boost if matches preference)
-    cat_bonus = filtered["category"].isin(cats_pref).astype(float) * 0.05
-
-    # Weighted sum → 0..1
-    score01 = (0.75 * pop_norm) + (0.20 * fit) + cat_bonus
-    score01 = score01.clip(lower=0.0, upper=1.0)
-
-    filtered = filtered.assign(_score=score01)
-
-    # ------- Build response -------
-    filtered = filtered.sort_values("_score", ascending=False).head(10)
-
-    recs: List[Recommendation] = []
-    for _, row in filtered.iterrows():
+    # ---------- Build response ----------
+    scored = []
+    for idx, l in enumerate(listings):
         reasons = []
-        if row["_score"] >= 0:
-            if cats_pref and row["category"] in cats_pref:
-                reasons.append(f"matches preferred category {row['category']}")
-            if max_price > 0:
-                if row["price"] <= max_price:
-                    reasons.append(f"within your budget (≤ {max_price})")
-                else:
-                    reasons.append("slightly above budget")
-            # popularity reasoning
-            if pmax > pmin and row["pop"] >= (pmin + 0.66 * (pmax - pmin)):
-                reasons.append("popular on campus")
+        if cat_matches[idx] > 0: reasons.append(f"same category {l.category}")
+        if cond_matches[idx] > 0: reasons.append(f"same condition {l.condition}")
+        if title_sims[idx] >= 0.40: reasons.append("title looks similar")
+        if pop_norm[idx] >= 0.66: reasons.append("popular on campus")
+        if personalized_flags[idx]: reasons.append("personalized for you")
 
-        recs.append(
-            Recommendation(
-                listing_id=row["listing_id"],
-                score=_scale01_to_pct(float(row["_score"])),
-                reason=", ".join(reasons) if reasons else "recommended by popularity"
-            )
-        )
+        pct = int(round(100 * max(0.0, min(1.0, float(final01[idx])))))
+        scored.append((pct, Recommendation(listing_id=l.id, score=pct, reason=", ".join(reasons) if reasons else "relevant match")))
 
-    summary_bits = []
-    if cats_pref:
-        summary_bits.append(f"focused on categories {sorted(cats_pref)}")
-    if max_price > 0:
-        summary_bits.append(f"priced at or under {max_price}")
-    if not summary_bits:
-        summary_bits.append("ranked by popularity")
-    reasoning = "; ".join(summary_bits) + "."
+    scored.sort(key=lambda x: -x[0])
+    top = [rec for _, rec in scored[:10]]
 
-    return RecommendOut(recommendations=recs, reasoning=reasoning)
+    why = []
+    if cand_cat:  why.append(f"matching category “{cand_cat}”")
+    if cand_cond: why.append(f"matching condition “{cand_cond}”")
+    if cand_title or cand_desc: why.append("similar titles/descriptions")
+    if any("popular on campus" in r.reason for r in top):
+        why.append("boosted by item popularity")
+    if any("personalized for you" in r.reason for r in top):
+        why.append("personalized using your past activity")
+    if not why:  why.append("overall relevance")
+
+    return RecommendOut(recommendations=top, reasoning="; ".join(why) + ".")

@@ -1,12 +1,38 @@
 from pydantic import BaseModel, Field
 from typing import List, Union
 
-# ---------- /predict-price ----------
-class PredictPriceIn(BaseModel):
-    title: str
-    description: str
+from pydantic import BaseModel, ConfigDict
+from typing import Optional
+
+
+# ---------- Shared ----------
+class BaseLooseModel(BaseModel):
+    # ignore any unexpected keys; prevents 422 even if backend adds fields
+    model_config = ConfigDict(extra='ignore')
+
+
+# ---------- /price-suggest ----------
+class MarketStats(BaseLooseModel):
+    avg_price: Optional[float] = None
+    median_price: Optional[float] = None
+    min_price: Optional[float] = None
+    max_price: Optional[float] = None
+    sample_size: Optional[int] = 0
+
+
+class PredictPriceIn(BaseLooseModel):
+    title: Optional[str] = None
+    description: Optional[str] = None
+    # If frontend sends normalized text, we'll prefer it; otherwise we normalize here.
+    title_norm: Optional[str] = None
+    description_norm: Optional[str] = None
+
     category: str
     condition: str
+
+    # New: backend now passes DB-driven stats for the category
+    market_stats: Optional[MarketStats] = None
+
 
 class PredictPriceOut(BaseModel):
     predicted_price: float          # e.g., 450.0
@@ -33,17 +59,38 @@ class DuplicateOut(BaseModel):
     similar_listing_ids: List[Union[int, str]]
 
 
-# ---------- /recommend ----------
-from pydantic import BaseModel, Field
-from typing import List, Union
+from typing import List, Optional, Union
+from pydantic import BaseModel, Field, ConfigDict
+
+# Let inputs accept extra keys safely
+class BaseLooseModel(BaseModel):
+    model_config = ConfigDict(extra="ignore")
 
 # ---------- /recommend ----------
-class UserPreferences(BaseModel):
-    categories: List[str]
-    max_price: float  # required
+class RecommendListingItem(BaseLooseModel):
+    id: Union[str, int]
+    title: Optional[str] = None
+    description: Optional[str] = None
+    price: Optional[float] = None
+    category: Optional[str] = None
+    condition: Optional[str] = None
+    # OPTIONAL engagement for popularity scoring
+    likes: Optional[int] = None
+    saved_count: Optional[int] = None
+    views: Optional[int] = None
 
-class RecommendIn(BaseModel):
-    user_preferences: UserPreferences  # <-- only user preferences
+class RecommendIn(BaseLooseModel):
+    # OPTIONAL user_id enables ALS personalization when mappings+model exist
+    user_id: Optional[Union[str, int]] = None
+
+    # Candidate context from backend
+    title: Optional[str] = None
+    description: Optional[str] = None
+    category: Optional[str] = None
+    condition: Optional[str] = None
+
+    # Pool to rank
+    available_listings: List[RecommendListingItem]
 
 class Recommendation(BaseModel):
     listing_id: Union[int, str]
@@ -52,5 +99,6 @@ class Recommendation(BaseModel):
 
 class RecommendOut(BaseModel):
     recommendations: List[Recommendation]
-    reasoning: str  # top-level summary for the response
+    reasoning: str
+
 
