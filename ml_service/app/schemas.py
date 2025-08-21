@@ -21,8 +21,7 @@ class MarketStats(BaseLooseModel):
 
 
 class PredictPriceIn(BaseLooseModel):
-    class PredictPriceIn(BaseLooseModel):
-        title: str
+    title: str
     description: str
     category: str
     condition: str
