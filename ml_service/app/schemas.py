@@ -21,16 +21,13 @@ class MarketStats(BaseLooseModel):
 
 
 class PredictPriceIn(BaseLooseModel):
-    title: Optional[str] = None
-    description: Optional[str] = None
-    # If frontend sends normalized text, we'll prefer it; otherwise we normalize here.
-    title_norm: Optional[str] = None
-    description_norm: Optional[str] = None
-
+    class PredictPriceIn(BaseLooseModel):
+        title: str
+    description: str
     category: str
     condition: str
-
-    # New: backend now passes DB-driven stats for the category
+    title_norm: Optional[str] = None
+    description_norm: Optional[str] = None
     market_stats: Optional[MarketStats] = None
 
 
