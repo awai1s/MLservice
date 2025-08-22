@@ -54,7 +54,7 @@ class Settings:
     )
 
     # caching (optional). Empty disables caching cleanly.
-    REDIS_URL: str = os.getenv("REDIS_URL", "")
+    REDIS_URL: str = os.getenv("REDIS_URL", "redis://localhost:6379/2") 
     CACHE_TTL_S: int = int(os.getenv("CACHE_TTL_S", "600"))
 
     # logging
