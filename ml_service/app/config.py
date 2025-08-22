@@ -20,15 +20,15 @@ class Settings:
     DUP_THRESH_LO: float = float(os.getenv("DUP_THRESH_LO", "0.80"))
     DUP_MARGIN: float    = float(os.getenv("DUP_MARGIN",    "0.06"))
 
-    # model paths
+    BASE_DIR = Path(__file__).resolve().parents[1]  # points to /app
     PRICE_MODEL_PATH: str = os.getenv(
         "PRICE_MODEL_PATH",
-        "app/models/price_model_compat4_v2.joblib"
-    )
+        str(BASE_DIR / "models" / "price_model_compat4_v2.joblib")
+        )
     CALIB_PATH: str = os.getenv(
         "CALIB_PATH",
-        "app/models/error_bands_by_cat_cond.csv"
-    )
+        str(BASE_DIR / "models" / "error_bands_by_cat_cond.csv")
+        )
 
     # duplicate index (vectorizer + tfidf matrix + item_meta)
     DUP_INDEX_DIR: str = os.getenv(
