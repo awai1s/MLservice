@@ -11,3 +11,4 @@ httpx
 python-multipart
 xgboost==3.0.4
 pandas
+lightgbm==4.3.0
