@@ -30,6 +30,9 @@ class PredictPriceIn(BaseLooseModel):
     description_norm: Optional[str] = None
     market_stats: Optional[MarketStats] = None
 
+class PriceRange(BaseModel):
+    min: float
+    max: float
 
 class PredictPriceOut(BaseModel):
     predicted_price: float          # e.g., 450.0
@@ -37,6 +40,7 @@ class PredictPriceOut(BaseModel):
     max_predicted_price: float      # upper bound of price band
     confidence: int                 # 0..100
     explanation: str
+    price_range: Optional[PriceRange] = None
 
 
 # ---------- /check-duplicate ----------

@@ -237,6 +237,7 @@ def price_suggest(payload: PredictPriceIn):
         max_predicted_price=round(hi, 2),
         confidence=conf,
         explanation=expl,
+        price_range={"min": round(lo, 2), "max": round(hi, 2)}
         )
 
     except Exception:
@@ -249,4 +250,5 @@ def price_suggest(payload: PredictPriceIn):
             max_predicted_price=round(half * scale, 2),
             confidence=50,
             explanation="Fallback: model unavailable or input outside domain.",
+            price_range={"min": 0.0, "max": round(half * scale, 2)}
         )
