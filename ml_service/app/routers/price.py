@@ -139,8 +139,10 @@ def _blend_with_market(y_model: float, payload: PredictPriceIn) -> (float, str, 
     baseline = None
     if stats.median_price is not None:
         baseline = float(stats.median_price)
-    elif stats.avg_price is not None:
-        baseline = float(stats.avg_price)
+    else:
+        avg = stats.avg_price if getattr(stats, "avg_price", None) is not None else getattr(stats, "average_price", None)
+        if avg is not None:
+            baseline = float(avg)
 
     # default: if both avg & median are missing, nothing to blend
     if baseline is None:
@@ -195,7 +197,7 @@ def _interval_from_point(y: float, payload: PredictPriceIn) -> (float, float):
 # =========================
 # Endpoint
 # =========================
-@router.post("/price-suggest", response_model=PredictPriceOut)
+@router.post("/predict-price", response_model=PredictPriceOut)
 @timeboxed(settings.BUDGET_PRICE_MS)
 def price_suggest(payload: PredictPriceIn):
     """

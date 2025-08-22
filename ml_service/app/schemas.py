@@ -14,6 +14,7 @@ class BaseLooseModel(BaseModel):
 # ---------- /price-suggest ----------
 class MarketStats(BaseLooseModel):
     avg_price: Optional[float] = None
+    average_price: Optional[float] = None
     median_price: Optional[float] = None
     min_price: Optional[float] = None
     max_price: Optional[float] = None
