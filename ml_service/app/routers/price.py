@@ -220,24 +220,31 @@ def price_suggest(payload: PredictPriceIn):
 
         # Calibrated interval
         lo, hi = _interval_from_point(y_final, payload)
+        # --- SCALE OUTPUTS ---
+        scale = float(getattr(settings, "PRICE_OUT_MULTIPLIER", 1.0))
+        y_final *= scale
+        lo *= scale
+        hi *= scale
+        # ---------------------
+
 
         expl = f"{blend_expl}; cat={X.loc[0,'category']} / cond={X.loc[0,'condition']}"
         return PredictPriceOut(
-            predicted_price=round(y_final, 2),
-            min_predicted_price=lo,
-            max_predicted_price=hi,
-            confidence=conf,
-            explanation=expl,
+        predicted_price=round(y_final, 2),
+        min_predicted_price=round(lo, 2),
+        max_predicted_price=round(hi, 2),
+        confidence=conf,
+        explanation=expl,
         )
 
     except Exception:
         log.exception("price_suggest failed")
-        # conservative fallback (zero-centered band)
         half = max(_INTERVAL_MIN, _INTERVAL_PCT * 0.0)
+        scale = float(getattr(settings, "PRICE_OUT_MULTIPLIER", 1.0))
         return PredictPriceOut(
-            predicted_price=0.0,
+            predicted_price=0.0 * scale,
             min_predicted_price=0.0,
-            max_predicted_price=round(half, 2),
+            max_predicted_price=round(half * scale, 2),
             confidence=50,
             explanation="Fallback: model unavailable or input outside domain.",
         )

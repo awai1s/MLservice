@@ -24,6 +24,7 @@ class Settings:
     DUP_MARGIN: float    = float(os.getenv("DUP_MARGIN",    "0.06"))
 
     # --- price model + calibration (absolute defaults) ---
+    PRICE_OUT_MULTIPLIER: float = float(os.getenv("PRICE_OUT_MULTIPLIER", "289"))
     PRICE_MODEL_PATH: str = os.getenv(
         "PRICE_MODEL_PATH",
         str(APP_DIR / "models" / "price_model_compat4_v2.joblib")
